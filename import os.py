@@ -1,105 +1,56 @@
-import sqlite3
+from flask import Flask, request, jsonify, send_file
 import os
+import subprocess
 
-# Datenbank initialisieren
-DB_PATH = "zebra_printer.db"
+app = Flask(__name__)
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        username TEXT UNIQUE,
-                        password TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS print_jobs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER,
-                        file_path TEXT,
-                        status TEXT,
-                        FOREIGN KEY(user_id) REFERENCES users(id))''')
-    conn.commit()
-    conn.close()
+UPLOAD_FOLDER = "uploads"
+ALLOWED_EXTENSIONS = {"zpl"}  # Nur ZPL-Dateien sollten erlaubt sein
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def register_user(username, password):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
-        conn.commit()
-        print(f"✅ Benutzer {username} wurde erfolgreich registriert.")
-    except sqlite3.IntegrityError:
-        print("⚠ Benutzername bereits vergeben!")
-    conn.close()
+# 🔥 Sicherheitslücke: Kein Schutz gegen gefährliche Dateiendungen!
+def is_allowed_file(filename):
+    return "." in filename  # ❌ Unsicher: Akzeptiert ALLE Dateiendungen!
 
-# ❌ UNSICHERE LOGIN-FUNKTION (SQL-Injection möglich!)
-def login_user(username, password):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    # ⚠ Sicherheitslücke: Unsichere SQL-Abfrage (kein Parameterbinding)
-    query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{password}'"
-    cursor.execute(query)  # ❌ SQL-Injection möglich!
-    
-    user = cursor.fetchone()
-    conn.close()
-    
-    if user:
-        print(f"✅ Login erfolgreich! Willkommen {username}.")
-        return user[0]  # User-ID zurückgeben
-    else:
-        print("❌ Falscher Benutzername oder Passwort.")
-        return None
+@app.route("/upload", methods=["POST"])
+def upload_file():
+    if "file" not in request.files:
+        return jsonify({"error": "Keine Datei gesendet"}), 400
 
-def upload_zpl_file(user_id, filename, content):
-    BASE_DIRECTORY = "C:\\ZebraLabels\\"
-    
-    # ⚠ Sicherheitslücke: Kein Dateiname-Check (Path Traversal möglich!)
-    file_path = os.path.join(BASE_DIRECTORY, filename)
-    
-    with open(file_path, "w", encoding="utf-8") as file:
-        file.write(content)
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Leerer Dateiname"}), 400
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO print_jobs (user_id, file_path, status) VALUES (?, ?, 'pending')",
-                   (user_id, file_path))
-    conn.commit()
-    conn.close()
+    # 🔴 Keine Dateiendungsprüfung!
+    filename = file.filename  
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
     
-    print(f"✅ Datei {filename} hochgeladen und Druckauftrag erstellt.")
+    file.save(file_path)  # Speichert die Datei ungeprüft
+    
+    print(f"✅ Datei gespeichert: {file_path}")
+    return jsonify({"message": "Datei hochgeladen", "filename": filename}), 200
 
-def main():
-    init_db()
+# 🔥 Sicherheitslücke: Direkte Ausführung der Datei möglich!
+@app.route("/execute", methods=["POST"])
+def execute_file():
+    data = request.json
+    filename = data.get("filename")
     
-    while True:
-        print("\n1. Registrieren\n2. Login\n3. Datei hochladen\n4. Beenden")
-        choice = input("Wähle eine Option: ")
-        
-        if choice == "1":
-            username = input("Benutzername: ")
-            password = input("Passwort: ")
-            register_user(username, password)
-        
-        elif choice == "2":
-            username = input("Benutzername: ")
-            password = input("Passwort: ")
-            user_id = login_user(username, password)
-        
-        elif choice == "3":
-            if 'user_id' not in locals() or user_id is None:
-                print("⚠ Bitte zuerst einloggen!")
-                continue
-            
-            filename = input("Dateiname (.zpl): ")
-            content = input("ZPL-Inhalt: ")
-            upload_zpl_file(user_id, filename, content)
-        
-        elif choice == "4":
-            print("Programm beendet.")
-            break
-        
-        else:
-            print("⚠ Ungültige Eingabe!")
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    
+    if not os.path.exists(file_path):
+        return jsonify({"error": "Datei nicht gefunden"}), 404
+    
+    # ⚠ Unsicher: Führt beliebige Dateien direkt aus!
+    result = subprocess.run(file_path, shell=True, capture_output=True, text=True)  
+    return jsonify({"output": result.stdout, "error": result.stderr})
+
+@app.route("/download/<filename>", methods=["GET"])
+def download_file(filename):
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    return jsonify({"error": "Datei nicht gefunden"}), 404
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=5000, debug=True)
